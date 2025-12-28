@@ -1,0 +1,89 @@
+name: 一加 Ace 5 至尊版内核编译（虚拟化/容器化特供）
+on:
+  workflow_dispatch:
+    inputs:
+      enable_kvm:
+        description: "启用 KVM 硬件虚拟化（含pKVM扩展）"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      enable_lxc:
+        description: "启用 LXC 容器基础支持"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      enable_docker:
+        description: "启用 Docker 容器（OverlayFS 存储驱动）"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 最大化磁盘空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+      - name: 安装依赖
+        run: |
+          sudo apt update
+          sudo apt install -y git repo bc bison flex libssl-dev gcc-aarch64-linux-gnu clang
+      - name: 同步源码
+        run: |
+          repo init -u https://github.com/PLMmko/kernel_manifest.git -b oneplus/sm8650 -m oneplus_ace5_b.xml
+          repo sync -c -j$(nproc) --no-clone-bundle
+      - name: 配置编译环境（虚拟化/容器化特供）
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          cd android_kernel_oneplus_sm8650
+          # 加载默认配置
+          make oneplus_sm8650_defconfig
+          # 启用 KVM + pKVM
+          if [ "${{ github.event.inputs.enable_kvm }}" = "true" ]; then
+            echo "CONFIG_HAVE_KVM=y" >> .config
+            echo "CONFIG_KVM=y" >> .config
+            echo "CONFIG_KVM_ARM=y" >> .config
+            echo "CONFIG_KVM_ARM_VHE=y" >> .config
+            echo "CONFIG_KVM_ARM_PMU=y" >> .config  # pKVM 性能监控扩展
+            echo "CONFIG_KVM_ARM_MAX_VCPUS=8" >> .config
+          fi
+          # 启用 LXC 基础支持
+          if [ "${{ github.event.inputs.enable_lxc }}" = "true" ]; then
+            echo "CONFIG_CGROUPS=y" >> .config
+            echo "CONFIG_NAMESPACES=y" >> .config
+            echo "CONFIG_USER_NS=y" >> .config
+            echo "CONFIG_SECCOMP=y" >> .config
+            echo "CONFIG_LXC=y" >> .config
+          fi
+          # 启用 Docker（OverlayFS 存储驱动）
+          if [ "${{ github.event.inputs.enable_docker }}" = "true" ]; then
+            echo "CONFIG_OVERLAY_FS=y" >> .config  # Docker 依赖的 Overlay 文件系统
+            echo "CONFIG_MEMCG=y" >> .config      # 内存控制组
+            echo "CONFIG_CGROUP_DEVICE=y" >> .config  # 设备控制组
+          fi
+          # 保存配置
+          make savedefconfig
+          mv defconfig arch/arm64/configs/oneplus_sm8650_defconfig
+      - name: 开始编译
+        run: |
+          cd android_kernel_oneplus_sm8650
+          make -j$(nproc) CC=clang CXX=clang++
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-output
+          path: android_kernel_oneplus_sm8650/arch/arm64/boot/Image.gz-dtb
